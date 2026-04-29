@@ -15,10 +15,25 @@ class TSPModel(nn.Module):
         self.encoded_nodes = None
         # shape: (batch, problem, EMBEDDING_DIM)
 
+        # Optional M2 distance / kNN logit bias. ``None`` = baseline (no bias).
+        self.distance_bias_module = None
+
+    def attach_distance_bias(self, module):
+        """Attach an optional distance-bias module (M2).
+
+        When set, ``pre_forward`` will call ``module.prepare(problems)`` and
+        the decoder will add ``module(current_node)`` to its logits.
+        Passing ``None`` restores baseline behaviour.
+        """
+        self.distance_bias_module = module
+        self.decoder.set_bias_module(module)
+
     def pre_forward(self, reset_state):
         self.encoded_nodes = self.encoder(reset_state.problems)
         # shape: (batch, problem, EMBEDDING_DIM)
         self.decoder.set_kv(self.encoded_nodes)
+        if self.distance_bias_module is not None and getattr(self.distance_bias_module, "enabled", False):
+            self.distance_bias_module.prepare(reset_state.problems)
 
     def forward(self, state):
         batch_size = state.BATCH_IDX.size(0)
@@ -35,7 +50,11 @@ class TSPModel(nn.Module):
         else:
             encoded_last_node = _get_encoding(self.encoded_nodes, state.current_node)
             # shape: (batch, pomo, embedding)
-            probs = self.decoder(encoded_last_node, ninf_mask=state.ninf_mask)
+            probs = self.decoder(
+                encoded_last_node,
+                ninf_mask=state.ninf_mask,
+                current_node=state.current_node,
+            )
             # shape: (batch, pomo, problem)
 
             if self.training or self.model_params['eval_type'] == 'softmax':
@@ -168,6 +187,12 @@ class TSP_Decoder(nn.Module):
         self.single_head_key = None  # saved, for single-head attention
         self.q_first = None  # saved q1, for multi-head attention
 
+        # M2: optional logit-bias module. When None, baseline behaviour.
+        self.bias_module = None
+
+    def set_bias_module(self, module):
+        self.bias_module = module
+
     def set_kv(self, encoded_nodes):
         # encoded_nodes.shape: (batch, problem, embedding)
         head_num = self.model_params['head_num']
@@ -185,9 +210,10 @@ class TSP_Decoder(nn.Module):
         self.q_first = reshape_by_heads(self.Wq_first(encoded_q1), head_num=head_num)
         # shape: (batch, head_num, n, qkv_dim)
 
-    def forward(self, encoded_last_node, ninf_mask):
+    def forward(self, encoded_last_node, ninf_mask, current_node=None):
         # encoded_last_node.shape: (batch, pomo, embedding)
         # ninf_mask.shape: (batch, pomo, problem)
+        # current_node.shape: (batch, pomo) - needed only when M2 bias is attached.
 
         head_num = self.model_params['head_num']
 
@@ -217,6 +243,12 @@ class TSP_Decoder(nn.Module):
         # shape: (batch, pomo, problem)
 
         score_clipped = logit_clipping * torch.tanh(score_scaled)
+
+        # M2 logit bias (added BEFORE ninf_mask so masked positions stay -inf).
+        if self.bias_module is not None and getattr(self.bias_module, "enabled", False) and current_node is not None:
+            bias = self.bias_module(current_node)
+            if bias.shape == score_clipped.shape:
+                score_clipped = score_clipped + bias
 
         score_masked = score_clipped + ninf_mask
 

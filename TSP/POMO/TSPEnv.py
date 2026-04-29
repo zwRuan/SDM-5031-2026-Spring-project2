@@ -54,10 +54,19 @@ class TSPEnv:
         self.edge_weight_type = None
         self.original_node_xy_lib = None
 
-    def load_problems(self, batch_size, aug_factor=1):
+    def load_problems(self, batch_size, aug_factor=1, epoch=None, total_epochs=None, msc_config=None):
         self.batch_size = batch_size
 
-        self.problems = get_random_problems(batch_size, self.problem_size)
+        # Mixed Structured Curriculum is opt-in.  When ``msc_config`` is None
+        # or has ``enabled=False`` this call collapses to the original uniform
+        # sampler, preserving baseline behaviour bit-for-bit.
+        self.problems = get_random_problems(
+            batch_size,
+            self.problem_size,
+            epoch=epoch,
+            total_epochs=total_epochs,
+            config=msc_config,
+        )
         # problems.shape: (batch, problem, 2)
         if aug_factor > 1:
             if aug_factor == 8:

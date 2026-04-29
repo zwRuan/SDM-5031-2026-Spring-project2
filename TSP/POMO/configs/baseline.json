@@ -1,0 +1,9 @@
+{
+  "run_name": "baseline",
+  "description": "Unmodified POMO baseline with 8x test-time augmentation. Used as the reference for win-rate.",
+  "needs_training": false,
+  "test_flags": {
+    "augmentation_enable": true,
+    "aug_factor": 8
+  }
+}

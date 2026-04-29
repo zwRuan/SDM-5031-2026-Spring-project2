@@ -105,7 +105,7 @@ python test.py \
 
 ### 1. 复现 baseline 在公开验证集上的结果
 
-```bash
+```bash·
 cd TSP/POMO
 python test.py \
   --data_path ../data/val \

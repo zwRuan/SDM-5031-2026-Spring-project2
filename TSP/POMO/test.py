@@ -144,6 +144,54 @@ def build_parser():
         default=DEFAULT_DEBUG_MODE,
         help="Use a smaller size filter for quick debugging.",
     )
+
+    # -------- Experiment / ablation housekeeping --------
+    parser.add_argument("--run_name", default=None, help="Short experiment name (e.g. m1_rerank_b4_d5).")
+    parser.add_argument("--summary_dir", default=None, help="Directory to append a summary.csv/json row.")
+    parser.add_argument(
+        "--baseline_ref_json",
+        default=None,
+        help="Path to a baseline summary JSON for computing win-rate vs baseline.",
+    )
+
+    # -------- M1: SGBS-lite reranking (inference) --------
+    parser.add_argument("--rerank_enabled", type=str2bool, default=False)
+    parser.add_argument("--rerank_beam_width", type=int, default=4)
+    parser.add_argument("--rerank_depth", type=int, default=5)
+    parser.add_argument("--rerank_topk_per_step", type=int, default=4)
+    parser.add_argument("--rerank_use_entropy_gate", type=str2bool, default=False)
+    parser.add_argument("--rerank_entropy_threshold", type=float, default=1.0)
+    parser.add_argument("--rerank_pool_across_augs", type=str2bool, default=True)
+    parser.add_argument("--rerank_deduplicate", type=str2bool, default=True)
+
+    # -------- M4: 2-opt post-processing --------
+    parser.add_argument("--two_opt_enabled", type=str2bool, default=False)
+    parser.add_argument(
+        "--two_opt_target",
+        choices=["final_best", "topk_candidates"],
+        default="final_best",
+    )
+    parser.add_argument("--two_opt_topk", type=int, default=3)
+    parser.add_argument("--two_opt_max_iters", type=int, default=50)
+    parser.add_argument("--two_opt_first_improvement", type=str2bool, default=True)
+    parser.add_argument(
+        "--two_opt_time_budget_ms",
+        type=lambda v: None if str(v).lower() in {"none", "null", ""} else float(v),
+        default=None,
+    )
+
+    # -------- M2: distance / kNN bias (inference + training flag) --------
+    parser.add_argument("--distance_bias_enabled", type=str2bool, default=False)
+    parser.add_argument("--distance_bias_scale", type=float, default=1.0)
+    parser.add_argument("--distance_bias_mode", choices=["logit", "attn"], default="logit")
+    parser.add_argument(
+        "--distance_norm_mode",
+        choices=["none", "mean", "max", "std"],
+        default="mean",
+    )
+    parser.add_argument("--knn_bias_enabled", type=str2bool, default=False)
+    parser.add_argument("--knn_k", type=int, default=10)
+    parser.add_argument("--knn_bias_value", type=float, default=0.5)
     return parser
 
 
@@ -164,6 +212,34 @@ def build_tester_params(args):
         "detailed_log": args.detailed_log,
         # Only EUC_2D / CEIL_2D are supported (same as ICAM's LIBUtils.TSPLIBReader)
         "scale_range_all": [[args.scale_min, args.scale_max]],
+        # M1 rerank
+        "rerank_enabled": args.rerank_enabled,
+        "rerank_beam_width": args.rerank_beam_width,
+        "rerank_depth": args.rerank_depth,
+        "rerank_topk_per_step": args.rerank_topk_per_step,
+        "rerank_use_entropy_gate": args.rerank_use_entropy_gate,
+        "rerank_entropy_threshold": args.rerank_entropy_threshold,
+        "rerank_pool_across_augs": args.rerank_pool_across_augs,
+        "rerank_deduplicate": args.rerank_deduplicate,
+        # M4 2-opt
+        "two_opt_enabled": args.two_opt_enabled,
+        "two_opt_target": args.two_opt_target,
+        "two_opt_topk": args.two_opt_topk,
+        "two_opt_max_iters": args.two_opt_max_iters,
+        "two_opt_first_improvement": args.two_opt_first_improvement,
+        "two_opt_time_budget_ms": args.two_opt_time_budget_ms,
+        # M2 distance bias
+        "distance_bias_enabled": args.distance_bias_enabled,
+        "distance_bias_scale": args.distance_bias_scale,
+        "distance_bias_mode": args.distance_bias_mode,
+        "distance_norm_mode": args.distance_norm_mode,
+        "knn_bias_enabled": args.knn_bias_enabled,
+        "knn_k": args.knn_k,
+        "knn_bias_value": args.knn_bias_value,
+        # Bookkeeping
+        "run_name": args.run_name,
+        "summary_dir": args.summary_dir,
+        "baseline_ref_json": args.baseline_ref_json,
     }
     return tester_params
 
@@ -238,7 +314,40 @@ def main():
     payload = build_result_payload(args, tester_params, result)
     dump_json_if_needed(args.output_json, payload)
 
+    # Optional: append to a shared ablation summary (CSV + JSON).
+    if args.summary_dir is not None:
+        try:
+            from ablation.summary import write_summary_row
+            run_name = args.run_name or _default_run_name(args)
+            write_summary_row(
+                summary_dir=os.path.abspath(args.summary_dir),
+                run_name=run_name,
+                payload=payload,
+                config=tester_params,
+                baseline_ref_json=args.baseline_ref_json,
+            )
+        except Exception as err:  # pragma: no cover - non-fatal
+            logging.getLogger("root").warning("summary write failed: %s", err)
+
     print("SUMMARY_JSON: " + json.dumps(payload, ensure_ascii=False, sort_keys=True))
+
+
+def _default_run_name(args):
+    parts = []
+    if args.rerank_enabled:
+        parts.append("m1_b{}_d{}".format(args.rerank_beam_width, args.rerank_depth))
+    if args.distance_bias_enabled or args.knn_bias_enabled:
+        tag = "m2"
+        if args.distance_bias_enabled:
+            tag += "_dist{:.2f}".format(args.distance_bias_scale)
+        if args.knn_bias_enabled:
+            tag += "_knn{}".format(args.knn_k)
+        parts.append(tag)
+    if args.two_opt_enabled:
+        parts.append("m4_{}_top{}".format(args.two_opt_target, args.two_opt_topk))
+    if not parts:
+        return "baseline"
+    return "+".join(parts)
 
 
 def _print_config(args, tester_params):

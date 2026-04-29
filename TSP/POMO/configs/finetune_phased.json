@@ -1,0 +1,70 @@
+{
+  "run_name": "finetune_phased_B400_all_three",
+  "description": "Phased fine-tune from baseline epoch-3000: Phase 1 (bias adapter, 15% of B) -> Phase 2 (MSC main, 50%) -> Phase 3 (leader-focused reward, 35%). Loaded by `finetune_phased.py --config <this file>`. CLI flags override anything here.",
+  "needs_training": true,
+
+  "_phase_split_explanation": "B is split as 15% / 50% / 35%. For B=400 -> phase epochs are 60 / 200 / 140.",
+
+  "total_finetune_epochs": 400,
+  "resume_checkpoint": "./result/saved_tsp100_model2_longTrain/checkpoint-3000.pt",
+  "desc": "phased",
+  "ablation": "all_three",
+
+  "train_episodes": 100000,
+  "train_batch_size": 64,
+  "weight_decay": 1e-6,
+  "grad_clip_max_norm": 1.0,
+  "continue_epoch_counter": true,
+  "model_save_interval": 100,
+  "img_save_interval": 100,
+
+  "_reserve_vram_gb_doc": "Defensive 'occupy' tensor on a shared GPU to keep other users from squeezing onto the card. Capped automatically so the trainer always retains >= 8 GB. Sized for the typical 2-jobs-per-A100-40GB setup (each job: 6 GB train + 12 GB holder = 18 GB, total 36/40 GB used). For single-job-per-A100-40GB use --reserve_vram_gb 30. Set to 0 to disable.",
+  "reserve_vram_gb": 12,
+
+  "backbone_lr": 1e-5,
+  "new_module_lr": 3e-5,
+  "phase3_lr": 5e-5,
+  "phase3_final_lr": 5e-6,
+
+  "enable_bias": true,
+  "knn_bias_enabled": true,
+  "knn_k": 30,
+  "knn_bias_value": 1.0,
+  "distance_bias_scale": 1.0,
+  "distance_norm_mode": "mean",
+  "bias_warmup_epochs": null,
+
+  "enable_msc": true,
+  "msc_use_curriculum": true,
+
+  "phase1_uniform_ratio": 0.6,
+  "phase1_clustered_ratio": 0.3,
+  "phase1_gaussian_ratio": 0.1,
+
+  "phase2_uniform_ratio": 0.4,
+  "phase2_clustered_ratio": 0.4,
+  "phase2_gaussian_ratio": 0.2,
+
+  "phase3_uniform_ratio": 0.2,
+  "phase3_clustered_ratio": 0.5,
+  "phase3_gaussian_ratio": 0.3,
+
+  "enable_leader": true,
+  "leader_mode": "bonus_adv",
+  "leader_alpha": 20.0,
+  "leader_alpha_final": 40.0,
+  "leader_aux_weight": 0.1,
+  "leader_rampup_portion": 0.2,
+  "leader_infinite_mode": false,
+
+  "param_name_mapping": {
+    "_doc": "Mapping from spec semantic names to existing implementation keys, kept here for reproducibility.",
+    "knn_k / neighborhood_size": "knn_k (DistanceBiasModule.cfg)",
+    "bias_strength / xi / knn_v": "knn_bias_value (DistanceBiasModule.cfg) and/or distance_bias_scale",
+    "leader_alpha / reward_scale": "leader_gamma (train_ext.leader_reward.compute_leader_loss); mapped via alpha/20 in finetune_phased.py:map_alpha_to_gamma",
+    "leader_rampup_portion": "implemented as a per-epoch callback that linearly ramps leader_gamma from 0 to map_alpha_to_gamma(leader_alpha) over rampup_portion * phase3_epochs",
+    "leader_stage_lr_drop": "implemented as a linear LR decay across phase 3 from phase3_lr to phase3_final_lr (per-epoch callback)",
+    "bias_param_group_lr_multiplier": "INFO-ONLY: current DistanceBiasModule has no learnable parameters; flag is logged but no extra param-group is created",
+    "leader_infinite_mode": "INFO-ONLY: not implemented in train_ext.leader_reward; ignored at runtime"
+  }
+}
