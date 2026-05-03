@@ -177,6 +177,10 @@ def build_parser():
                    help="Optional JSON config; CLI flags override its values.")
     p.add_argument("--total_finetune_epochs", type=int, default=DEFAULT_HPARAMS['total_finetune_epochs'],
                    help="Total fine-tune budget B; phases get 15%%/50%%/35%% of B.")
+    p.add_argument("--phase_epochs", type=str, default=None,
+                   help="Override 15/50/35 split with explicit 'n1,n2,n3'. Use '0,0,140' "
+                        "to resume only phase 3 from a phase-2 ckpt (skips bias warmup + MSC). "
+                        "When set, --total_finetune_epochs is ignored for split logic.")
     p.add_argument("--resume_checkpoint", default=DEFAULT_BASELINE_CKPT,
                    help="Path to baseline checkpoint to resume from (weights only).")
     p.add_argument("--desc", default="phased_finetune",
@@ -241,9 +245,10 @@ def build_parser():
     # Ablation convenience flags (mutually-non-exclusive overrides)
     p.add_argument("--ablation", choices=[
         "all_three", "bias_only", "msc_only", "leader_only",
-        "bias_msc", "msc_leader", "bias_leader",
+        "bias_msc", "msc_leader", "bias_leader", "control",
     ], default="all_three",
-                   help="Quick ablation preset; sets enable_* flags accordingly.")
+                   help="Quick ablation preset; sets enable_* flags accordingly. "
+                        "'control' = all modules off (pure baseline+finetune).")
     return p
 
 
@@ -251,6 +256,11 @@ def apply_ablation_preset(args):
     """Mutate ``args.enable_*`` according to ``args.ablation``."""
     a = args.ablation
     if a == "all_three":
+        return
+    if a == "control":
+        args.enable_bias = False
+        args.enable_msc = False
+        args.enable_leader = False
         return
     args.enable_bias = a in {"bias_only", "bias_msc", "bias_leader"}
     args.enable_msc = a in {"msc_only", "bias_msc", "msc_leader"}
@@ -581,7 +591,17 @@ def main():
     if args.total_finetune_epochs <= 0:
         raise ValueError("--total_finetune_epochs must be positive.")
 
-    n1, n2, n3 = split_budget(args.total_finetune_epochs)
+    if args.phase_epochs is not None:
+        parts = [p.strip() for p in args.phase_epochs.split(',')]
+        if len(parts) != 3:
+            raise ValueError("--phase_epochs must be 'n1,n2,n3' (3 ints)")
+        n1, n2, n3 = (int(parts[0]), int(parts[1]), int(parts[2]))
+        if n1 < 0 or n2 < 0 or n3 < 0:
+            raise ValueError("--phase_epochs values must be non-negative")
+        if (n1 + n2 + n3) == 0:
+            raise ValueError("--phase_epochs must have at least one phase > 0")
+    else:
+        n1, n2, n3 = split_budget(args.total_finetune_epochs)
 
     logger_params = build_logger_params(args)
     create_logger(**logger_params)

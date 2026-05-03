@@ -18,8 +18,8 @@
   "model_save_interval": 100,
   "img_save_interval": 100,
 
-  "_reserve_vram_gb_doc": "Defensive 'occupy' tensor on a shared GPU to keep other users from squeezing onto the card. Capped automatically so the trainer always retains >= 8 GB. Sized for the typical 2-jobs-per-A100-40GB setup (each job: 6 GB train + 12 GB holder = 18 GB, total 36/40 GB used). For single-job-per-A100-40GB use --reserve_vram_gb 30. Set to 0 to disable.",
-  "reserve_vram_gb": 12,
+  "_reserve_vram_gb_doc": "Defensive 'occupy' tensor on a shared GPU to keep other users from squeezing onto the card. Capped automatically so the trainer always retains >= 8 GB. Set to a positive value via CLI when sharing the GPU with strangers (e.g. --reserve_vram_gb 12 on a 40GB A100). Default 0 because: (a) on a private 24GB 4090 we want to run 2 jobs of our own and the holder would starve the second one; (b) on a 40GB A100 we still want CLI-controlled holder rather than an implicit one.",
+  "reserve_vram_gb": 0,
 
   "backbone_lr": 1e-5,
   "new_module_lr": 3e-5,
