@@ -181,6 +181,11 @@ def build_parser():
                    help="Override 15/50/35 split with explicit 'n1,n2,n3'. Use '0,0,140' "
                         "to resume only phase 3 from a phase-2 ckpt (skips bias warmup + MSC). "
                         "When set, --total_finetune_epochs is ignored for split logic.")
+    p.add_argument("--phase3_snapshot_epochs", type=str, default=None,
+                   help="Comma-separated in-phase epoch numbers (1-indexed) at which to "
+                        "snapshot the current phase-3 best to a tagged file "
+                        "checkpoint-phase_3_leader_best_at_{N}.pt. Lets one long run produce "
+                        "multiple 'best of first N epochs' ckpts. Example: '420' for a 560 ep run.")
     p.add_argument("--resume_checkpoint", default=DEFAULT_BASELINE_CKPT,
                    help="Path to baseline checkpoint to resume from (weights only).")
     p.add_argument("--desc", default="phased_finetune",
@@ -655,7 +660,14 @@ def main():
         # lr decay). When leader is off, we still want a no-op callback for
         # the visibility log line at start/end of phase 3.
         cb3 = make_phase3_callback(args, n3)
-        summaries.append(trainer.run_phase(n3, phase_name='3_leader', epoch_callback=cb3))
+        snapshot_eps = []
+        if args.phase3_snapshot_epochs:
+            snapshot_eps = [int(x.strip()) for x in args.phase3_snapshot_epochs.split(',')]
+            log.info("Phase 3 will snapshot phase-best at in-phase epochs: %s", snapshot_eps)
+        summaries.append(trainer.run_phase(
+            n3, phase_name='3_leader', epoch_callback=cb3,
+            snapshot_at_phase_epochs=snapshot_eps,
+        ))
 
     # -------------------- Final summary ---------------------------
     log.info("==[FINETUNE-PHASED DONE]==")

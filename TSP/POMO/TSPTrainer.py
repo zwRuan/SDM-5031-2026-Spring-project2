@@ -279,7 +279,7 @@ class TSPTrainer:
         )
 
     def run_phase(self, num_epochs, phase_name='phase', save_phase_best=True,
-                  epoch_callback=None):
+                  epoch_callback=None, snapshot_at_phase_epochs=None):
         """Run ``num_epochs`` training epochs starting from ``self.start_epoch``.
 
         Mirrors :meth:`run` but is bounded by ``num_epochs``. Updates
@@ -287,6 +287,13 @@ class TSPTrainer:
         optional ``epoch_callback(trainer, epoch_in_phase, abs_epoch)`` is
         invoked *before* each epoch (after scheduler.step) so callers can
         ramp up bias strength / leader gamma per-epoch.
+
+        ``snapshot_at_phase_epochs`` is a list/set of in-phase epoch indices
+        (1-indexed). After processing those epochs, the current phase-best
+        checkpoint is copied to a tagged file
+        ``checkpoint-phase_{phase_name}_best_at_{N}.pt``. Useful when a single
+        long run should produce ckpts equivalent to multiple shorter runs
+        (e.g., run 560 ep but also keep "best of first 420 ep").
         """
         log = self.logger
         end_epoch = self.start_epoch + int(num_epochs) - 1
@@ -301,6 +308,7 @@ class TSPTrainer:
         self.time_estimator.reset(self.start_epoch)
         phase_best_score = float('inf')
         phase_best_path = None
+        snapshot_set = set(int(e) for e in (snapshot_at_phase_epochs or []))
         model_save_interval = self.trainer_params['logging']['model_save_interval']
         img_save_interval = self.trainer_params['logging']['img_save_interval']
         for i, epoch in enumerate(range(self.start_epoch, end_epoch + 1), start=1):
@@ -354,6 +362,19 @@ class TSPTrainer:
                 phase_best_score = train_score
                 phase_best_path = '{}/checkpoint-phase_{}_best.pt'.format(self.result_folder, phase_name)
                 torch.save(ckpt_dict, phase_best_path)
+
+            # Snapshot the current phase best at user-specified in-phase epochs.
+            # Captures "best of first N epochs" for multi-budget reporting.
+            if i in snapshot_set:
+                if phase_best_path is not None and os.path.exists(phase_best_path):
+                    import shutil
+                    snap_path = '{}/checkpoint-phase_{}_best_at_{}.pt'.format(
+                        self.result_folder, phase_name, i)
+                    shutil.copy(phase_best_path, snap_path)
+                    log.info("[snapshot] in-phase %d: copied phase best (score=%.4f) -> %s",
+                             i, phase_best_score, os.path.basename(snap_path))
+                else:
+                    log.warning("[snapshot] in-phase %d: no phase best yet, skipping snapshot.", i)
 
         if phase_best_path is not None:
             log.info("[PHASE %s] phase_best train_score=%.4f saved to %s",
