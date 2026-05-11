@@ -141,7 +141,7 @@ python test.py \
     --output_json /path/to/eval_result.json
 ```
 
-`--checkpoint_path` 推荐使用 `checkpoint-phase_3_leader_best.pt`。`bias_cfg` 会从 ckpt 自动加载并 attach 到模型，与训练时配置完全一致。
+`--checkpoint_path` 推荐使用 `./result/best_ckpt_1/checkpoint-alpha10_20_280.pt`。`bias_cfg` 会从 ckpt 自动加载并 attach 到模型，与训练时配置完全一致。
 
 ### 3.2 在 validation 集上评测
 
