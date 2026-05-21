@@ -1,6 +1,8 @@
-# Phased Fine-Tuning of POMO with Three Inductive-Bias Modules
+# Phased Fine-Tuning of POMO with Three Inductive-Bias Modules + Size Curriculum
 
-> 本项目对 SDM-5031 课程提供的 POMO baseline 进行 fine-tune，引入三个独立模块和一套三阶段训练框架，在 validation 集上将 `avg_aug_gap` 从 baseline 的 **2.330%** 降低到 **1.117%**（相对降幅 **52.0%**）。
+> 本项目对 SDM-5031 课程提供的 POMO baseline 进行 fine-tune，引入三个独立模块、一套三阶段训练框架，以及一个 **Phase 4 size curriculum**（多 N 训练）。在 validation 集上将 `avg_aug_gap` 从 baseline 的 **2.330%** 降低到 **0.624%**（相对降幅 **73.2%**）。
+>
+> **最终提交模型**：`TSP/POMO/result/20260512_012500_phased_PHASE4_A_from_alpha10_20_280_B400_all_three/checkpoint-3580.pt`
 
 ## 1. 改动总览
 
@@ -14,13 +16,16 @@
 
 ### 1.2 新增训练框架
 
-**Phased Fine-Tune（三阶段）**：[TSP/POMO/finetune_phased.py](TSP/POMO/finetune_phased.py)
+**Phased Fine-Tune（三阶段 + Phase 4 size curriculum）**：[TSP/POMO/finetune_phased.py](TSP/POMO/finetune_phased.py)
 
-| Phase | epochs (B=400) | 主任务 | learning rate |
+| Phase | epochs | 主任务 | learning rate |
 |---|---|---|---|
 | Phase 1 (`1_bias`) | 60 (15%) | bias 模块线性 warm-up | 1e-5 |
 | Phase 2 (`2_msc`) | 200 (50%) | MSC 分布主适应 | 1e-5 |
-| Phase 3 (`3_leader`) | 140 (35%) | leader-focused reward + lr decay | 5e-5 → 5e-6 |
+| Phase 3 (`3_leader`) | 140–280 (35–70%) | leader-focused reward + lr decay | 5e-5 → 5e-6 |
+| **Phase 4 (size curriculum)** | 150（在 Phase 3 best ckpt 上继续训练）| per-batch 从 $N\in\{100,150,200,250\}$（权重 1:3:3:2）抽样；leader 冻结；MSC + bias 继承 | 1e-5 → 1e-6 |
+
+Phase 4 通过 `--n_values` / `--n_weights` CLI flag 启用；不传则退化为标准三阶段训练。
 
 配置文件：[TSP/POMO/configs/finetune_phased.json](TSP/POMO/configs/finetune_phased.json)
 
@@ -98,7 +103,38 @@ python finetune_phased.py --config ./configs/finetune_phased.json \
     --desc tune_alpha10_20_280
 ```
 
-### 2.4 多任务并行（在单 GPU 上）
+### 2.4 Phase 4：在 Phase 3 best ckpt 上加 size curriculum（⭐ 最终模型）
+
+从已经训好的 `alpha10_20_280` ckpt 起步，多 N 训练 150 epoch；leader α 冻结（rampup=0），learning rate 线性降到 1/10：
+
+```bash
+cd TSP/POMO
+python finetune_phased.py \
+    --config ./configs/finetune_phased.json \
+    --resume_checkpoint ./result/best_ckpt_1/checkpoint-alpha10_20_280.pt \
+    --continue_epoch_counter true \
+    --phase_epochs 0,0,150 \
+    --phase3_snapshot_epochs 45,90,120,140 \
+    --train_episodes 50000 --train_batch_size 48 \
+    --phase3_lr 1e-5 --phase3_final_lr 1e-6 \
+    --knn_k 20 \
+    --leader_alpha 20 --leader_alpha_final 20 --leader_rampup_portion 0 \
+    --n_values 100,150,200,250 --n_weights 1,3,3,2 \
+    --model_save_interval 20 \
+    --ablation all_three \
+    --desc PHASE4_A_from_alpha10_20_280
+```
+
+要点：
+- `--continue_epoch_counter true`：epoch 计数从 anchor 的 3400 继续递增，便于按全局 epoch 取 ckpt（最终选的是 `checkpoint-3580.pt`，即 in-phase epoch 42）。
+- `--knn_k 20`：**必须显式传**，否则会用 DEFAULT_HPARAMS 的 30，与 anchor 的 `bias_cfg` 不一致。
+- `--n_values / --n_weights`：N 在 batch 之间变化（per-batch 固定单 N，因为 tensor shape 在 batch 内必须一致）。权重 1:3:3:2 故意降低 N=100 的比例，因为 anchor 已在 N=100 上过训练。
+- `--train_batch_size 48`：在 48GB VRAM 上跑 N=250 的上限（batch=64 在 N=250 会 OOM）。
+- 单卡 A100-48G 上耗时约 18 小时（150 epoch × 50k episodes × ~7 min/epoch）。
+
+输出目录：`result/<timestamp>_phased_PHASE4_A_from_alpha10_20_280_B400_all_three/`
+
+### 2.5 多任务并行（在单 GPU 上）
 
 在 24GB 4090 上可同时跑两个任务：
 
@@ -141,7 +177,7 @@ python test.py \
     --output_json /path/to/eval_result.json
 ```
 
-`--checkpoint_path` 推荐使用 `./result/best_ckpt_1/checkpoint-alpha10_20_280.pt`。`bias_cfg` 会从 ckpt 自动加载并 attach 到模型，与训练时配置完全一致。
+`--checkpoint_path` 使用最终提交模型 `./result/20260512_012500_phased_PHASE4_A_from_alpha10_20_280_B400_all_three/checkpoint-3580.pt`。`bias_cfg` 会从 ckpt 自动加载并 attach 到模型，与训练时配置完全一致。
 
 ### 3.2 在 validation 集上评测
 
@@ -164,20 +200,22 @@ bash scripts/validate_phased.sh result/<run_dir>
 
 ## 4. 主要实验结果
 
-### 4.1 Validation 集（10 个 TSPLIB 实例，N=100-300）
+### 4.1 Validation 集（10 个实例，N=100-300）
 
-| 配置 | avg_no_aug_gap | **avg_aug_gap** | Δ vs baseline |
-|---|---|---|---|
-| baseline (3000ep) | 3.754% | 2.330% | — |
-| control (3000+400ep, all off) | 3.199% | 1.962% | -0.368% |
-| winner_k20 (k=20, α=20→40) | 1.693% | **1.122%** | -1.208% |
-| alpha=10→20 (140 ep) | 1.779% | 1.181% | -1.149% |
-| alpha=40→60 (140 ep) | 1.641% | 1.184% | -1.146% |
-| **p3double (α=20→40, 280 ep)** | 1.815% | **1.117%** ⭐ | **-1.213%** |
-| **TODO:p3double (α=10→20, 280 ep)** | - |- | -|
+| 配置 | **avg_aug_gap** | Δ vs baseline |
+|---|---|---|
+| baseline (3000 ep) | 2.330% | — |
+| control (3000+400 ep, all off) | 1.962% | −0.368% |
+| winner_k20 (k=20, α=20→40, 140 ep) | 1.122% | −1.208% |
+| alpha=10→20 (140 ep) | 1.181% | −1.149% |
+| alpha=40→60 (140 ep) | 1.184% | −1.146% |
+| p3double (α=20→40, 280 ep) | 1.117% | −1.213% |
+| alpha10\_20\_280 (α=10→20, 280 ep, **Phase 4 anchor**) | 1.170% | −1.160% |
+| ⭐ **Phase 4 winner: `checkpoint-3580.pt`** | **0.624%** | **−1.706%** (**−73.2%** rel) |
 
-→ **In-distribution (N=100-200)**：`p3double` 最佳
-→ **OOD (N>200)**：`alpha=10→20` 最佳（**size-generalization trade-off**）
+Phase 4 size curriculum 同时改善 in-distribution 和 OOD 桶：
+- N∈[100,200]（8 实例）：0.347 → 0.303
+- N∈[201,300]（2 实例）：4.465 → 1.906（相对降 −57%）
 
 ---
 
@@ -185,22 +223,24 @@ bash scripts/validate_phased.sh result/<run_dir>
 
 ```
 SDM-5031-2026-Spring/
-├── README.md                         # 课程原始 README（保留）
-├── README_new.md                     # 本文件
+├── README.md                         # 本文件
+├── README_bak.md                     # 课程原始 README（保留）
 ├── slides/
-│   └── sdm5031_project_pre.tex     # 答辩 slides
+│   └── sdm5031_project_pre_new.tex   # 答辩 slides
+├── report/
+│   └── sdm5031_project_report.tex    # 最终报告
 ├── TSP/
 │   ├── TSProblemDef.py               # +MSC 三个 generator
 │   └── POMO/
-│       ├── finetune_phased.py        # 三阶段 fine-tune 主入口（新增）
+│       ├── finetune_phased.py        # 四阶段 fine-tune 主入口（含 Phase 4 size curriculum）
 │       ├── test.py                   # 标准评测入口（保留原接口）
-│       ├── TSPTrainer.py             # +bias_cfg 嵌入 ckpt
+│       ├── TSPTrainer.py             # +bias_cfg 嵌入 ckpt; +per-batch n_sampler
 │       ├── TSPTester_LIB.py          # +bias_cfg 自动 attach
 │       ├── TSPModel.py               # +distance_bias_module hook
 │       ├── model_ext/
-│       │   └── distance_bias.py      
+│       │   └── distance_bias.py
 │       ├── train_ext/
-│       │   └── leader_reward.py      
+│       │   └── leader_reward.py
 │       ├── configs/
 │       │   └── finetune_phased.json  # 默认配置
 │       ├── scripts/
@@ -216,24 +256,47 @@ SDM-5031-2026-Spring/
 
 ---
 
-## 6. 复现 valid data上winner（暂时） 的最快路径
+## 6. 复现最终模型的最快路径
+
+最终模型由两段训练拼接而成：先得到 Phase 3 anchor，再在其上跑 Phase 4 size curriculum。
 
 ```bash
-# 1. 训练（约 33h dual / 20h solo on RTX 4090）
 cd TSP/POMO
+
+# 1. Phase 1-3：得到 anchor ckpt（α=10→20，Phase 3 长度 280 epoch）
+#    单卡 RTX 4090 约 20h
 python finetune_phased.py --config ./configs/finetune_phased.json \
     --total_finetune_epochs 400 \
+    --phase_epochs 60,200,280 \
     --resume_checkpoint ./result/saved_tsp100_model2_longTrain/checkpoint-3000.pt \
-    --ablation all_three --knn_k 20 --desc winner_k20
+    --ablation all_three --knn_k 20 \
+    --leader_alpha 10 --leader_alpha_final 20 \
+    --desc anchor_alpha10_20_280
+# 取 ./result/<timestamp>_anchor_alpha10_20_280_*/checkpoint-phase_3_leader_best.pt
+# 重命名/拷到 ./result/best_ckpt_1/checkpoint-alpha10_20_280.pt（方便下一步引用）
 
-# 2. 评测（用项目原始 README 规定的标准命令）
+# 2. Phase 4：size curriculum 150 epoch（A100-48G 约 18h）
+python finetune_phased.py --config ./configs/finetune_phased.json \
+    --resume_checkpoint ./result/best_ckpt_1/checkpoint-alpha10_20_280.pt \
+    --continue_epoch_counter true \
+    --phase_epochs 0,0,150 \
+    --train_episodes 50000 --train_batch_size 48 \
+    --phase3_lr 1e-5 --phase3_final_lr 1e-6 \
+    --knn_k 20 \
+    --leader_alpha 20 --leader_alpha_final 20 --leader_rampup_portion 0 \
+    --n_values 100,150,200,250 --n_weights 1,3,3,2 \
+    --model_save_interval 20 \
+    --ablation all_three \
+    --desc PHASE4_A_from_alpha10_20_280
+
+# 3. 评测：用全局 epoch 3580 的 ckpt（in-phase epoch 42）
 python test.py \
     --data_path ../data/val \
-    --checkpoint_path ./result/best_ckpt_1/checkpoint-phase_3_leader_best.pt \
+    --checkpoint_path ./result/<PHASE4_A run dir>/checkpoint-3580.pt \
     --use_cuda true --cuda_device_num 0 \
     --augmentation_enable true --aug_factor 8 \
     --detailed_log false \
-    --output_json /tmp/winner_eval.json
-
+    --output_json /tmp/final_eval.json
+# 期望 avg_aug_gap ≈ 0.624%
 ```
 
