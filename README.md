@@ -130,28 +130,8 @@ python finetune_phased.py \
 - `--knn_k 20`：**必须显式传**，否则会用 DEFAULT_HPARAMS 的 30，与 anchor 的 `bias_cfg` 不一致。
 - `--n_values / --n_weights`：N 在 batch 之间变化（per-batch 固定单 N，因为 tensor shape 在 batch 内必须一致）。权重 1:3:3:2 故意降低 N=100 的比例，因为 anchor 已在 N=100 上过训练。
 - `--train_batch_size 48`：在 48GB VRAM 上跑 N=250 的上限（batch=64 在 N=250 会 OOM）。
-- 单卡 A100-48G 上耗时约 18 小时（150 epoch × 50k episodes × ~7 min/epoch）。
+- 单卡48G 上耗时约 18 小时（150 epoch × 50k episodes × ~7 min/epoch）。
 
-输出目录：`result/<timestamp>_phased_PHASE4_A_from_alpha10_20_280_B400_all_three/`
-
-### 2.5 多任务并行（在单 GPU 上）
-
-在 24GB 4090 上可同时跑两个任务：
-
-```bash
-# Task 1 后台启动
-CUDA_VISIBLE_DEVICES=0 nohup python finetune_phased.py \
-    --config ./configs/finetune_phased.json --total_finetune_epochs 400 \
-    --resume_checkpoint .../checkpoint-3000.pt \
-    --ablation all_three --knn_k 20 --desc run1 > logs/run1.log 2>&1 &
-
-sleep 15  # 错开启动，避免初始化撞 OOM
-
-# Task 2 后台启动
-CUDA_VISIBLE_DEVICES=0 nohup python finetune_phased.py \
-    --config ./configs/finetune_phased.json --total_finetune_epochs 400 \
-    --resume_checkpoint .../checkpoint-3000.pt \
-    --ablation bias_only --knn_k 20 --desc run2 > logs/run2.log 2>&1 &
 ```
 
 每个任务约占 5-6 GB 显存，dual 共享 GPU-Util ~97% 时每个 epoch 约 6.8 分钟（vs solo ~5 min）。
@@ -198,28 +178,8 @@ python test.py \
 bash scripts/validate_phased.sh result/<run_dir>
 ```
 
-## 4. 主要实验结果
 
-### 4.1 Validation 集（10 个实例，N=100-300）
-
-| 配置 | **avg_aug_gap** | Δ vs baseline |
-|---|---|---|
-| baseline (3000 ep) | 2.330% | — |
-| control (3000+400 ep, all off) | 1.962% | −0.368% |
-| winner_k20 (k=20, α=20→40, 140 ep) | 1.122% | −1.208% |
-| alpha=10→20 (140 ep) | 1.181% | −1.149% |
-| alpha=40→60 (140 ep) | 1.184% | −1.146% |
-| p3double (α=20→40, 280 ep) | 1.117% | −1.213% |
-| alpha10\_20\_280 (α=10→20, 280 ep, **Phase 4 anchor**) | 1.170% | −1.160% |
-| ⭐ **Phase 4 winner: `checkpoint-3580.pt`** | **0.624%** | **−1.706%** (**−73.2%** rel) |
-
-Phase 4 size curriculum 同时改善 in-distribution 和 OOD 桶：
-- N∈[100,200]（8 实例）：0.347 → 0.303
-- N∈[201,300]（2 实例）：4.465 → 1.906（相对降 −57%）
-
----
-
-## 5. 项目结构
+## 4. 项目结构
 
 ```
 SDM-5031-2026-Spring/
@@ -256,7 +216,7 @@ SDM-5031-2026-Spring/
 
 ---
 
-## 6. 复现最终模型的最快路径
+## 5. 复现最终模型的最快路径
 
 最终模型由两段训练拼接而成：先得到 Phase 3 anchor，再在其上跑 Phase 4 size curriculum。
 
