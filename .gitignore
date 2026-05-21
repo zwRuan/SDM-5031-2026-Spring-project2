@@ -9,7 +9,7 @@ TSP/POMO/result/*
 !TSP/POMO/result/saved_tsp100_model2_longTrain/
 !TSP/POMO/result/best_ckpt_1/
 !TSP/POMO/result/best_ckpt_2/
-!TSP/POMO/result/best_ckpt_2/better_than_best_ckpt2_in_val
+!TSP/POMO/result/better_than_best_ckpt2_in_val
 !TSP/POMO/result/best_ckpt_1/checkpoint-phase_3_leader_best.pt
 !TSP/POMO/result/saved_tsp100_model2_longTrain/checkpoint-3000.pt
 TSP/POMO/result_lib/
