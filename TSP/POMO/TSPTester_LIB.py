@@ -300,6 +300,16 @@ class TSPTester_LIB:
         else:
             aug_factor = 1
 
+        # Apply LLM-discovered coordinate projection (test-time only, no retraining).
+        # The projection transforms coordinates to help the model select better tours.
+        # If best_projection.py is not present, the standard normalisation is used.
+        try:
+            from best_projection import projection
+            with torch.no_grad():
+                nodes_xy_normalized = projection(nodes_xy_normalized)
+        except (ImportError, Exception):
+            pass
+
         problems = nodes_xy_normalized
         if aug_factor > 1:
             problems = augment_xy_data_by_8_fold(problems)

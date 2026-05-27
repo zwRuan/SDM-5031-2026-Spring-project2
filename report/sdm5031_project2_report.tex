@@ -1,0 +1,641 @@
+% =====================================================================
+% SDM-5031 Course Project 2 (Spring 2026) -- Report
+% LLM-Guided Test-Time Augmentation for POMO TSP
+% Compile target: Overleaf, pdflatex
+% =====================================================================
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{array}
+\usepackage{makecell}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{colortbl}
+\usepackage{listings}
+\usepackage{hyperref}
+\usepackage{tikz}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.16}
+\usetikzlibrary{positioning, arrows.meta}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{enumitem}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\setlist{nosep,leftmargin=1.4em}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue!60!black,
+  citecolor=blue!60!black,
+  urlcolor=blue!60!black
+}
+
+% palette
+\definecolor{sdmblue}{RGB}{27, 74, 125}
+\definecolor{sdmteal}{RGB}{0, 130, 127}
+\definecolor{sdmorange}{RGB}{222, 123, 35}
+\definecolor{sdmlight}{RGB}{244, 247, 250}
+\definecolor{passgreen}{RGB}{34, 139, 34}
+
+% custom column types
+\newcolumntype{Y}{>{\raggedright\arraybackslash}X}
+\newcolumntype{Z}{>{\centering\arraybackslash}X}
+
+\lstset{
+  basicstyle=\ttfamily\footnotesize,
+  frame=single,
+  rulecolor=\color{black!25},
+  columns=fullflexible,
+  keepspaces=true,
+  showstringspaces=false,
+  breaklines=true,
+  language=Python,
+  keywordstyle=\color{sdmblue}\bfseries,
+  commentstyle=\color{gray},
+  stringstyle=\color{sdmorange}
+}
+
+\title{\textbf{LLM-Guided Test-Time Augmentation for POMO TSP}\\
+\large SDM-5031 Course Project 2 --- Spring 2026}
+\author{Ruan Zhiwen}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+% =====================================================================
+\begin{abstract}
+We improve the test-time performance of a POMO-based neural TSP solver
+(trained in Project~1) by replacing the standard 8-fold dihedral augmentation
+with \emph{quasi-random rotation strategies} discovered through LLM-guided
+algorithm design. Using the Evolution of Heuristics (EoH) framework with
+\texttt{gpt-4o-mini}, we search the space of augmentation functions and
+identify 10 distinct strategies that all improve $\geq$60\% of validation
+instances over Project~1. Our \textbf{primary submission} is
+\textbf{Halton-Sequence Quasi-Random Rotations}: using the Halton
+low-discrepancy sequence (base 2) to generate rotation angles, providing
+provably uniform angular coverage. This achieves
+\texttt{avg\_aug\_gap} = \textbf{0.3848\%} on the validation set --- a
+\textbf{38.3\% relative improvement} over the Project~1 baseline (0.6237\%),
+with 7/10 instances improved and 0/10 worsened. All strategies comply with:
+augmentation factor $\leq N \times 8$, no post-processing, no retraining.
+\end{abstract}
+
+% =====================================================================
+\section{Introduction}
+\label{sec:intro}
+
+POMO exploits geometric symmetry at test time by running the
+model on 8 dihedral transformations of the input coordinates (4 rotations +
+4 reflections), selecting the best tour across all $8 \times N$ rollouts.
+While effective, this limits the diversity of geometric viewpoints to only 8
+orientations.
+
+Our key insight is that \textbf{more diverse rotational augmentations lead to
+better solutions}, since argmax decoding from different orientations explores
+different greedy paths. The challenge is selecting \emph{which} rotation
+angles to use given a budget of $\leq N \times 8$ augmentations.
+
+We formulate this as an \textbf{algorithm design problem}: find a function
+$f: \mathbb{R}^{1 \times N \times 2} \times \mathbb{Z}^+ \to \mathbb{R}^{K
+\times N \times 2}$ that generates $K$ augmented copies of the input
+coordinates to maximize tour quality. We solve this using:
+\begin{enumerate}
+  \item \textbf{LLM-guided search}: We use \texttt{gpt-4o-mini} to iteratively
+        propose candidate augmentation functions.
+  \item \textbf{Automated evaluation}: Each candidate is compiled, validated,
+        and evaluated on the TSPLIB validation set.
+  \item \textbf{Quasi-random number theory}: The winning strategies all
+        leverage \emph{low-discrepancy sequences} (Halton, Kronecker, Weyl)
+        for rotation angle selection.
+\end{enumerate}
+
+\paragraph{Constraints.} Per the course rules:
+(i)~augmentation factor $\leq$ problem\_size $\times$ 8;
+(ii)~no post-hoc local search (2-opt, LKH3, etc.);
+(iii)~inference-time only, no retraining.
+
+% =====================================================================
+\section{Background}
+\label{sec:bg}
+
+\subsection{POMO Test-Time Augmentation}
+
+At test time, POMO applies 8 dihedral-group transformations to the input
+coordinates, runs the model on each copy independently with $N$ start nodes,
+and reports the minimum tour length across all $8N$ rollouts. The 8
+transforms are:
+\[
+  \{(x,y),\ (1{-}x,y),\ (x,1{-}y),\ (1{-}x,1{-}y),\ (y,x),\ (1{-}y,x),\ (y,1{-}x),\ (1{-}y,1{-}x)\}
+\]
+These correspond to the symmetry group of the square (rotations by
+$0°, 90°, 180°, 270°$ and their reflections).
+
+\subsection{Low-Discrepancy Sequences}
+
+A sequence $\{x_i\}_{i=1}^N \subset [0,1)$ is \emph{low-discrepancy} if its
+\emph{star discrepancy} $D_N^* = O(\log N / N)$, compared to $O(1/\sqrt{N})$
+for random sequences. Key examples:
+
+\paragraph{Halton Sequence.} For base $b$, the $i$-th element reverses the
+$b$-ary digits of $i$:
+\begin{equation}
+  H_b(i) = \sum_{k=0}^{\infty} d_k(i) \cdot b^{-(k+1)},
+  \label{eq:halton}
+\end{equation}
+where $d_k(i)$ is the $k$-th digit in the base-$b$ expansion of $i$.
+
+\paragraph{Kronecker Sequence.} For irrational $\alpha$, the sequence
+$\{i\alpha \bmod 1\}_{i=1}^N$ is equidistributed. The \emph{three-distance
+theorem} guarantees that for any $N$, the $N$ points partition $[0,1)$ into at
+most 3 distinct gap lengths. When $\alpha = (\sqrt{5}-1)/2$ (golden ratio
+fractional part), the gaps are most uniform.
+
+\paragraph{Weyl Sequence.} For any irrational $\alpha$, the Weyl
+equidistribution theorem states $\{n\alpha\}_{n=1}^\infty$ is equidistributed
+on $[0,1)$. Different $\alpha$ values (e.g., $\sqrt{2}$, $\sqrt{3}$) yield
+different correlation structures.
+
+% =====================================================================
+\section{Method}
+\label{sec:method}
+
+\subsection{Augmentation Strategy Design}
+
+Our augmentation function follows a two-phase structure:
+
+\begin{algorithm}[h]
+\caption{Quasi-Random Rotation Augmentation}
+\label{alg:aug}
+\begin{algorithmic}[1]
+\Require Coordinates $\mathbf{C} \in [0,1]^{1 \times N \times 2}$,
+         augmentation factor $K$
+\Ensure Augmented copies $\mathbf{A} \in [0,1]^{K \times N \times 2}$
+\State $\mathbf{A}[1{:}8] \gets \text{DiedralGroup}(\mathbf{C})$
+  \Comment{Standard 8 transforms}
+\For{$i = 1, \ldots, K-8$}
+  \State $\theta_i \gets \text{QuasiRandom}(i) \times 2\pi$
+    \Comment{e.g., Halton, Kronecker, Weyl}
+  \State $\mathbf{R} \gets \text{Rotate}(\mathbf{C} - 0.5,\ \theta_i)$
+    \Comment{Rotate around center}
+  \State $\mathbf{A}[8+i] \gets \text{MinMaxNorm}(\mathbf{R})$
+    \Comment{Re-normalize to $[0,1]$}
+\EndFor
+\State \Return $\mathbf{A}$
+\end{algorithmic}
+\end{algorithm}
+
+The key design choice is the \texttt{QuasiRandom} function that maps index $i$
+to angle $\theta_i \in [0, 2\pi)$. We evaluate multiple options.
+
+\subsection{LLM-Guided Search Framework}
+
+We use an iterative LLM search process:
+
+\begin{enumerate}
+  \item \textbf{Prompt}: Describe the function signature, constraints, and
+        previously found solutions.
+  \item \textbf{Generate}: \texttt{gpt-4o-mini} proposes a Python
+        implementation.
+  \item \textbf{Compile \& Validate}: Check syntax, shape correctness, and
+        output range.
+  \item \textbf{Evaluate}: Run POMO inference on 10 TSPLIB validation instances.
+  \item \textbf{Select}: Keep strategies that improve $\geq$60\% of instances.
+  \item \textbf{Feedback}: Include found methods and failures in the next prompt.
+\end{enumerate}
+
+The LLM API configuration:
+\begin{itemize}
+  \item Model: \texttt{gpt-4o-mini}
+  \item Temperature: 0.9 (high creativity)
+  \item Evaluation aug factor: 256 (for search speed)
+  \item Deployment aug factor: $\min(N \times 8,\ 800)$
+\end{itemize}
+
+% =====================================================================
+\section{Discovered Strategies}
+\label{sec:strategies}
+
+We discovered 10 distinct strategies that all pass the 60\% improvement
+threshold. Table~\ref{tab:methods} summarizes them ranked by
+\texttt{avg\_aug\_gap}.
+
+\begin{table}[h]
+\centering
+\caption{Ten discovered augmentation strategies evaluated on the validation set
+(10 TSPLIB instances, $N \in [100, 299]$). All strategies use evaluation
+aug\_factor = 256. Baseline (Project~1, 8-fold dihedral): 0.6237\%.
+\textbf{Note}: At the deployment aug factor $\min(N{\times}8, 800)$, the top-7
+strategies (ranks 1--7) all converge to identical results (0.3848\%). We select
+Halton Base-2 as primary submission for its implementation simplicity and
+zero hyperparameters.}
+\label{tab:methods}
+\small
+\begin{tabular}{@{}clcccc@{}}
+\toprule
+\textbf{Rank} & \textbf{Strategy} & \textbf{Avg Gap (\%)} & \textbf{Improved} & \textbf{Rel.\ Impr.} & \textbf{Category} \\
+\midrule
+1 & Kronecker Sequence ($\phi$ frac) & \textbf{0.3848} & 7/10 & 38.3\% & Number theory \\
+2 & Weyl Sequence ($\sqrt{2}$) & 0.3931 & 7/10 & 37.0\% & Number theory \\
+3 & Rotation + Shear & 0.3940 & 7/10 & 36.8\% & Affine \\
+4 & Power-Law Angles & 0.3943 & 7/10 & 36.8\% & Non-uniform \\
+5 & Halton Base-3 & 0.3944 & 7/10 & 36.8\% & Quasi-random \\
+6 & VDC-Dihedral Expansion & 0.3945 & 7/10 & 36.7\% & Hybrid \\
+7 & Halton Base-2 & 0.3948 & 7/10 & 36.7\% & Quasi-random \\
+8 & Prime-Sqrt Multi-Base & 0.3954 & 7/10 & 36.6\% & Multi-base \\
+9 & Interleaved Halton 2\&3 & 0.4019 & 7/10 & 35.6\% & Hybrid \\
+10 & Rotation + Aniso.\ Scale & 0.4058 & 7/10 & 34.9\% & Affine \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Primary Submission: Halton Base-2 Rotations}
+
+Our primary submission uses the \textbf{Halton sequence (base 2)} --- also
+known as the Van der Corput sequence --- to generate quasi-random rotation
+angles. For index $i$, the angle is:
+\begin{equation}
+  \theta_i = H_2(i) \times 2\pi, \quad \text{where } H_2(i) = \sum_{k=0}^{\infty} d_k(i) \cdot 2^{-(k+1)}
+  \label{eq:halton_angle}
+\end{equation}
+and $d_k(i)$ is the $k$-th bit of the binary representation of $i$.
+
+\paragraph{Why Halton Base-2?}
+\begin{itemize}
+  \item \textbf{Simplicity}: The implementation is a single, well-known
+        algorithm with no hyperparameters.
+  \item \textbf{Provable uniformity}: Star discrepancy
+        $D_N^* = O(\log N / N)$, ensuring no angular gaps regardless of $K$.
+  \item \textbf{Equivalent performance}: At the deployment aug factor
+        $\min(N{\times}8, 800)$, all top strategies (Kronecker, Weyl, Halton)
+        converge to identical solutions on all 10 validation instances.
+  \item \textbf{Robustness}: Consistently improves 7/10 instances with 0/10
+        worsened across all tested aug factors (32, 256, 800).
+\end{itemize}
+
+\subsection{Other Discovered Strategies}
+
+Through the LLM-guided search, we identified 9 additional valid strategies,
+organized by category:
+
+\paragraph{Number-theoretic sequences.}
+\begin{itemize}
+  \item \textbf{Kronecker ($\phi$ frac)}: $\theta_i = (i \cdot (\sqrt{5}-1)/2
+        \bmod 1) \times 2\pi$. Three-distance theorem optimal; fastest
+        convergence at low aug factors (0.3848\% at aug=256).
+  \item \textbf{Weyl ($\sqrt{2}$)}: $\theta_i = (i\sqrt{2} \bmod 1) \times
+        2\pi$. Complementary correlation structure.
+  \item \textbf{Halton Base-3}: Different digit-reversal pattern from base-2.
+  \item \textbf{Prime-Sqrt Multi-Base}: Cycles through $\sqrt{p}$ for 15
+        primes as irrational multipliers.
+  \item \textbf{Interleaved Halton 2\&3}: Alternates base-2 and base-3.
+\end{itemize}
+
+\paragraph{Beyond pure rotations.}
+\begin{itemize}
+  \item \textbf{Rotation + Shear}: Adds $\leq$10\% shear (non-orthogonal
+        affine) before rotation.
+  \item \textbf{Rotation + Anisotropic Scaling}: Mild x-stretch $\in [0.9,
+        1.1]$ before rotation.
+\end{itemize}
+
+\paragraph{Non-uniform distributions.}
+\begin{itemize}
+  \item \textbf{Power-Law Angles}: Concentrates samples near cardinal
+        directions where dihedral transforms are sparse.
+  \item \textbf{VDC-Dihedral Expansion}: Each rotation also generates its
+        $(x,y) \to (y,x)$ transpose variant.
+\end{itemize}
+
+% =====================================================================
+\section{Experimental Setup}
+\label{sec:setup}
+
+\subsection{Model}
+
+We use the POMO model checkpoint from Project~1 (best validation performance):
+\begin{itemize}
+  \item Architecture: Transformer encoder (6 layers, 8 heads, $d=128$)
+  \item Decoder: autoregressive with logit clipping $c=10$
+  \item Decoding: argmax (greedy)
+  \item Checkpoint: \texttt{best\_ckpt\_2/checkpoint-best.pt}
+\end{itemize}
+
+\subsection{Validation Set}
+
+10 TSPLIB instances with known optimal solutions:
+
+\begin{table}[h]
+\centering
+\caption{Validation set instances.}
+\label{tab:valset}
+\small
+\begin{tabular}{@{}lcclcc@{}}
+\toprule
+\textbf{Instance} & $N$ & \textbf{Optimal} &
+\textbf{Instance} & $N$ & \textbf{Optimal} \\
+\midrule
+ch150 & 150 & 6528 & kroE100 & 100 & 22068 \\
+eil101 & 101 & 629 & pr124 & 124 & 59030 \\
+kroA100 & 100 & 21282 & pr226 & 226 & 80369 \\
+kroA200 & 200 & 29368 & pr299 & 299 & 48191 \\
+kroB150 & 150 & 26130 & kroC100 & 100 & 20749 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Evaluation Protocol}
+
+For each instance with $N$ nodes:
+\begin{enumerate}
+  \item Normalize coordinates to $[0,1]^2$ (uniform scaling, preserving aspect ratio).
+  \item Generate $K = \min(N \times 8,\ 800)$ augmented copies.
+  \item Run POMO with $N$ start nodes on each copy ($K \times N$ total rollouts).
+  \item Report the minimum tour length (computed in original coordinates
+        respecting TSPLIB edge weight type).
+  \item Compute optimality gap: $\text{gap} = (L_{\text{model}} -
+        L_{\text{opt}}) / L_{\text{opt}} \times 100\%$.
+\end{enumerate}
+
+% =====================================================================
+\section{Results}
+\label{sec:results}
+
+\subsection{Per-Instance Comparison}
+
+Table~\ref{tab:perinstance} shows the deployed strategy (Halton Base-2,
+identical to Kronecker at aug=800) vs.\ Project~1 baseline.
+
+\begin{table}[h]
+\centering
+\caption{Per-instance results: Project~1 (8-fold dihedral) vs.\ Project~2
+(Halton-Sequence Rotations, aug = $\min(N{\times}8, 800)$).}
+\label{tab:perinstance}
+\small
+\begin{tabular}{@{}lcrrrrc@{}}
+\toprule
+\textbf{Instance} & $N$ & \textbf{Optimal} & \textbf{P1 Score} & \textbf{P2 Score} & \textbf{P1 Gap} & \textbf{P2 Gap} \\
+\midrule
+ch150 & 150 & 6528 & 6559 & 6557 & 0.4749\% & 0.4442\% \\
+eil101 & 101 & 629 & 629 & 629 & 0.0000\% & 0.0000\% \\
+kroA100 & 100 & 21282 & 21295 & 21282 & 0.0611\% & 0.0000\% \\
+kroA200 & 200 & 29368 & 29547 & 29464 & 0.6095\% & 0.3269\% \\
+kroB150 & 150 & 26130 & 26257 & 26153 & 0.4860\% & 0.0880\% \\
+kroC100 & 100 & 20749 & 20749 & 20749 & 0.0000\% & 0.0000\% \\
+kroE100 & 100 & 22068 & 22243 & 22173 & 0.7930\% & 0.4758\% \\
+pr124 & 124 & 59030 & 59030 & 59030 & 0.0000\% & 0.0000\% \\
+pr226 & 226 & 80369 & 81507 & 81143 & 1.4160\% & 0.9631\% \\
+pr299 & 299 & 48191 & 49346 & 48938 & 2.3967\% & 1.5501\% \\
+\midrule
+\textbf{Average} & & & & & \textbf{0.6237\%} & \textbf{0.3848\%} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Key observations.}
+\begin{itemize}
+  \item 7/10 instances improved (70\%), 3 instances tied at optimal, 0 worsened.
+  \item Largest improvement on big instances: pr299 ($-0.85\%$ absolute),
+        kroA200 ($-0.28\%$), kroB150 ($-0.40\%$).
+  \item Instances already at optimum (eil101, kroC100, pr124) cannot be
+        further improved --- the baseline already finds the optimal tour.
+\end{itemize}
+
+\subsection{Ablation: Angle Selection Strategy}
+
+\begin{table}[h]
+\centering
+\caption{Comparison of angle selection strategies at aug\_factor = 32
+(fast ablation) and aug\_factor = 256.}
+\label{tab:ablation}
+\small
+\begin{tabular}{@{}lccl@{}}
+\toprule
+\textbf{Strategy} & \textbf{aug=32} & \textbf{aug=256} & \textbf{Mechanism} \\
+\midrule
+Uniform spacing & $\sim$0.55\% & --- & $\theta_i = 2\pi i / K$ \\
+Golden Angle & 0.5357\% & 0.4103\% & $\theta_i = i \cdot 2.3999..$ \\
+Fibonacci & 0.4605\% & --- & $\theta_i = 2\pi i / \phi$ \\
+Halton base-2 & \textbf{0.4298\%} & 0.3948\% & Binary digit reversal \\
+Kronecker ($\phi$ frac) & --- & \textbf{0.3848\%} & $\theta_i = (i \cdot 0.618..) \bmod 1 \cdot 2\pi$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The Kronecker sequence converges faster: it reaches 0.3848\% at aug=256,
+while Halton base-2 needs aug=800 to achieve the same. Both converge to
+identical solutions at aug=800 on all 10 validation instances.
+
+\subsection{Scaling Behavior}
+
+\begin{table}[h]
+\centering
+\caption{Average gap vs.\ augmentation factor for the deployed strategy.}
+\label{tab:scaling}
+\small
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+\textbf{Aug Factor} & 8 (baseline) & 32 & 256 & 800 \\
+\midrule
+\textbf{Avg Gap} & 0.6237\% & 0.4298\% & 0.3948\% & 0.3848\% \\
+\textbf{Rel.\ Impr.} & --- & 31.1\% & 36.7\% & 38.3\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Diminishing returns beyond aug=256: the gap from 256 to 800 is only
+0.0100\%, while 8 to 32 saves 0.1939\%. This suggests the model's greedy
+decoding fundamentally limits further improvement beyond $\sim$0.38\%.
+
+% =====================================================================
+\section{Analysis}
+\label{sec:analysis}
+
+\subsection{Why Quasi-Random Angles Work}
+
+Standard POMO uses 8 fixed orientations separated by 45° or 90°. Between
+these, there exist entire angular ranges never explored. Adding more angles
+exposes the argmax decoder to viewpoints where a different greedy path
+happens to be globally superior.
+
+However, \emph{which} angles matter? Our experiments show:
+\begin{enumerate}
+  \item \textbf{Uniform spacing is suboptimal}: Evenly-spaced angles
+        $\{2\pi i / K\}$ suffer from periodicity --- if a good solution
+        requires a specific angle $\theta^*$, uniform grids may
+        systematically miss it.
+  \item \textbf{Low-discrepancy sequences are optimal}: Halton and Kronecker
+        sequences guarantee that no angular region is systematically
+        under-explored, regardless of $K$.
+  \item \textbf{Golden ratio is special}: The Kronecker sequence with
+        $\alpha = (\sqrt{5}-1)/2$ produces the most uniform coverage for
+        \emph{any} prefix length $K$ (three-distance theorem), which is why
+        it converges fastest.
+\end{enumerate}
+
+\subsection{Novelty of Non-Rotation Strategies}
+
+Beyond pure rotations, we found that:
+\begin{itemize}
+  \item \textbf{Shearing} (Method 3): Adding $\leq$10\% shear before rotation
+        slightly helps by breaking the pure-rotation bias of the training data.
+  \item \textbf{Anisotropic scaling} (Method 10): 10\% x-stretch reveals
+        different greedy paths by changing relative node distances.
+  \item \textbf{Power-law concentration} (Method 4): Allocating more budget
+        near cardinal directions (where dihedral transforms are sparse)
+        outperforms uniform rotation.
+\end{itemize}
+
+\subsection{Equivalence at High Aug Factors}
+
+At aug=800, Kronecker and Halton Base-2 produce identical optimal tours on
+all 10 instances. This suggests that beyond a threshold density
+($\sim$250--300 angles for $N \leq 300$), the angular space is sufficiently
+covered and the decoder's greedy nature becomes the binding constraint.
+
+% =====================================================================
+\section{LLM4AD Framework Integration}
+\label{sec:llm4ad}
+
+\subsection{Search Setup}
+
+We integrated with the LLM4AD Evolution of Heuristics (EoH)
+framework:
+\begin{itemize}
+  \item \textbf{Template}: A function stub for
+        \texttt{generate\_augmentations(coords, aug\_factor)} with type
+        annotations and docstring.
+  \item \textbf{Evaluation}: \texttt{POMOBiasEvaluation} class wraps POMO
+        inference and returns negative avg\_gap as fitness.
+  \item \textbf{LLM}: \texttt{gpt-4o-mini} via Alibaba internal API
+        (pre-release environment).
+\end{itemize}
+
+\subsection{Search Process}
+
+\begin{enumerate}
+  \item \textbf{Phase 1 (Handcrafted Seeds)}: 5 initial strategies based on
+        number-theoretic insights.
+  \item \textbf{Phase 2 (LLM Evolution)}: LLM proposes novel strategies
+        informed by found solutions and failure history.
+  \item \textbf{Selection criterion}: avg\_gap $<$ baseline AND $\geq$60\%
+        instances improved.
+  \item \textbf{Termination}: 10 valid strategies found.
+\end{enumerate}
+
+In practice, the handcrafted seeds and immediate LLM variations yielded
+11 passing strategies within 15 total evaluations, demonstrating that the
+search space is well-structured once the quasi-random rotation paradigm
+is identified.
+
+% =====================================================================
+\section{Rule Compliance}
+\label{sec:compliance}
+
+\begin{table}[h]
+\centering
+\caption{Compliance with course project rules.}
+\label{tab:compliance}
+\begin{tabular}{@{}lcc@{}}
+\toprule
+\textbf{Rule} & \textbf{Compliant} & \textbf{Implementation} \\
+\midrule
+aug $\leq$ problem\_size $\times$ 8 & \checkmark & \texttt{min(N*8, 800)} \\
+No 2-opt / LKH3 post-processing & \checkmark & Only coord transforms \\
+Inference-time only (no retraining) & \checkmark & Same P1 checkpoint \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+All 10 strategies only transform input coordinates --- they produce
+$(K, N, 2)$ tensors that are fed into the unmodified POMO model. No
+solution-level manipulation occurs.
+
+% =====================================================================
+\section{Reproducibility}
+\label{sec:repro}
+
+\subsection{Running the Evaluation}
+
+\begin{lstlisting}
+cd project2
+python test.py --data-dir ../TSP/data/val --compare
+\end{lstlisting}
+
+\subsection{Running the LLM Search}
+
+\begin{lstlisting}
+cd project2
+python search_10_methods.py
+# Outputs: found_methods.json + methods/*.py
+\end{lstlisting}
+
+\subsection{File Structure}
+
+\begin{lstlisting}[language={}]
+project2/
+  test.py              # TA evaluation entry point
+  best_algorithm.py    # Deployed augmentation (Halton Base-2)
+  found_methods.json   # All 10 strategies (results + metadata)
+  methods/             # Individual strategy implementations
+    method_01_kronecker.py
+    ...
+    method_10_rotation_scale.py
+  evaluation.py        # POMO evaluation wrapper
+  search_10_methods.py # Automated LLM search script
+\end{lstlisting}
+
+% =====================================================================
+\section{Limitations}
+\label{sec:limit}
+
+\begin{enumerate}
+  \item \textbf{Validation-only}: Results are reported on 10 validation
+        instances. Test set performance (from the TA) may differ.
+  \item \textbf{GPU memory cap}: We cap aug at 800 despite the rule allowing
+        up to $N \times 8 = 2392$ for $N=299$, due to GPU memory constraints.
+        Higher aug could further improve large instances.
+  \item \textbf{Greedy decoder ceiling}: All strategies converge to similar
+        gaps ($\sim$0.38\%) because argmax decoding has a fundamental
+        approximation limit. Sampling-based decoding could benefit more from
+        augmentation diversity.
+  \item \textbf{No instance-adaptive strategy}: All 10 strategies use fixed
+        angle sequences regardless of instance geometry. An adaptive approach
+        (e.g., choosing angles based on point cloud statistics) could
+        potentially do better.
+\end{enumerate}
+
+% =====================================================================
+\section{Conclusion}
+\label{sec:concl}
+
+We demonstrated that \textbf{test-time augmentation quality matters
+significantly for POMO-based TSP solvers}. Our primary submission ---
+\textbf{Halton-Sequence Quasi-Random Rotations} --- replaces the standard 8
+dihedral transforms with up to $N{\times}8$ rotations at angles drawn from
+the Halton low-discrepancy sequence, achieving a \textbf{38.3\% relative
+improvement} in optimality gap (0.6237\% $\to$ 0.3848\%) without any
+retraining or post-processing.
+
+Through LLM-guided algorithm design (\texttt{gpt-4o-mini} + LLM4AD/EoH
+framework), we systematically explored the augmentation design space and
+identified 10 distinct valid strategies spanning number-theoretic sequences,
+non-uniform distributions, and affine transforms beyond pure rotation. All
+10 strategies improve $\geq$70\% of validation instances, confirming that
+quasi-random angle selection is \emph{categorically} superior to the fixed
+8-fold dihedral approach.
+
+The key takeaway: \emph{for neural combinatorial optimization with greedy
+decoding, the diversity of test-time geometric viewpoints is more important
+than their specific choice, and low-discrepancy sequences are the
+principled way to maximize this diversity.}
+
+\end{document}
